@@ -8,7 +8,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 FROM base AS deps
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
-COPY . .   # <-- add this
+COPY . . 
 
 FROM deps AS dev
 EXPOSE 8000
