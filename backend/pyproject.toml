@@ -1,0 +1,51 @@
+[project]
+name = "church-songlist-backend"
+version = "0.1.0"
+description = "Catholic Church Songlist Management SaaS — FastAPI backend"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["src/infrastructure/db/migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",   # pycodestyle + pyflakes
+  "I",             # isort
+  "B",             # flake8-bugbear
+  "UP",            # pyupgrade
+  "SIM",           # flake8-simplify
+  "RUF",
+]
+ignore = [
+  "E501",  # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [
+  "**/__pycache__",
+  "src/infrastructure/db/migrations/versions",
+]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+# Strict checks apply only to the framework-agnostic domain layer per
+# Constitution Principle II — interfaces / use-case contracts must be tight.
+# (Using top-level `strict` instead of an executionEnvironments root override
+# so absolute imports like `src.domain.entities` still resolve correctly from
+# inside the domain layer.)
+strict = ["src/domain"]
+# FastAPI / SQLAlchemy stubs occasionally lag behind runtime — silence the
+# noisiest unknown-member warnings outside the domain.
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"

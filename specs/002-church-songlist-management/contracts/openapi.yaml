@@ -1,0 +1,664 @@
+openapi: 3.1.0
+info:
+  title: Church Songlist Management API
+  version: "1.0.0"
+  description: |
+    HTTP contract for the Catholic Church Songlist Management SaaS.
+
+    Authentication: Clerk-issued JWT in `Authorization: Bearer <token>` header.
+    Anonymous (no header) is permitted only on the read-only catalog endpoints
+    (FR-031). Mutating endpoints require role `ADMIN` or `SUPER_ADMIN`.
+
+    Concurrency: every mutable entity has an integer `version`. Update / delete
+    operations require the matching `If-Match: <version>` header; mismatch yields
+    `409 Conflict` (FR-030).
+
+servers:
+  - url: http://localhost:8083
+    description: Local dev (docker-compose)
+  - url: https://api.example.org
+    description: Placeholder production
+
+tags:
+  - name: Catalog (public read)
+  - name: Songs (admin write)
+  - name: Taxonomies (admin)
+  - name: Optional fields (admin)
+  - name: Users & roles (super admin)
+
+# ─────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Public read ────────────────────────────────────────────────────
+  /api/v1/songs:
+    get:
+      tags: [Catalog (public read)]
+      summary: List / search / filter songs (public)
+      description: |
+        Returns a paginated list of songs. Anonymous access permitted (FR-031, FR-022).
+        - `q` matches `title` OR any `composer.name` via trigram (FR-023).
+        - `season`, `mass`, `special_event` are repeatable query params (taxonomy value IDs).
+          Multiple values within one taxonomy are OR-combined; across taxonomies AND-combined (FR-024).
+      parameters:
+        - { in: query, name: q,             schema: { type: string, maxLength: 100 } }
+        - { in: query, name: season,        schema: { type: array, items: { $ref: "#/components/schemas/UUID" } }, style: form, explode: true }
+        - { in: query, name: mass,          schema: { type: array, items: { $ref: "#/components/schemas/UUID" } }, style: form, explode: true }
+        - { in: query, name: special_event, schema: { type: array, items: { $ref: "#/components/schemas/UUID" } }, style: form, explode: true }
+        - { in: query, name: page,          schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: page_size,     schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        "200":
+          description: Page of songs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SongPage" }
+
+  /api/v1/songs/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { $ref: "#/components/schemas/UUID" } }
+    get:
+      tags: [Catalog (public read)]
+      summary: Get song detail (public, FR-025)
+      responses:
+        "200":
+          description: Song detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SongDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    put:
+      tags: [Songs (admin write)]
+      summary: Update a song (FR-011)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer }, description: "Current `version` (FR-030)" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SongWriteRequest" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SongDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+    delete:
+      tags: [Songs (admin write)]
+      summary: Delete a song (FR-012)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ── Admin: create song ─────────────────────────────────────────────
+  /api/v1/admin/songs:
+    post:
+      tags: [Songs (admin write)]
+      summary: Create a song (FR-008, FR-009)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SongWriteRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SongDetail" }
+          headers:
+            Location:
+              description: URL of the created song
+              schema: { type: string, format: uri }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Duplicate (title, composer set) — FR-009
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      conflicting_song_id: { $ref: "#/components/schemas/UUID" }
+
+  # ── Admin: taxonomies ──────────────────────────────────────────────
+  /api/v1/admin/taxonomies/{kind}:
+    parameters:
+      - in: path
+        name: kind
+        required: true
+        schema:
+          type: string
+          enum: [seasons, masses, special_events]
+    get:
+      tags: [Taxonomies (admin)]
+      summary: List taxonomy values
+      description: Public read is also allowed (used by filter UI). Auth optional.
+      responses:
+        "200":
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TaxonomyValue" }
+    post:
+      tags: [Taxonomies (admin)]
+      summary: Create taxonomy value (FR-017)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyValueWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaxonomyValue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Duplicate name within kind
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/taxonomies/{kind}/{id}:
+    parameters:
+      - in: path
+        name: kind
+        required: true
+        schema: { type: string, enum: [seasons, masses, special_events] }
+      - in: path
+        name: id
+        required: true
+        schema: { $ref: "#/components/schemas/UUID" }
+    put:
+      tags: [Taxonomies (admin)]
+      summary: Rename taxonomy value (FR-017)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyValueWrite" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaxonomyValue" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Taxonomies (admin)]
+      summary: Delete (with detach) a taxonomy value (FR-019)
+      description: |
+        The `?detach=true` query parameter MUST be passed when the value is in use;
+        the request is otherwise rejected with 409. The frontend obtains the
+        usage count first via `GET .../usage` and presents the confirmation dialog.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+        - { in: query,  name: detach,   schema: { type: boolean, default: false } }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: In use, and `detach=false`
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      usage_count: { type: integer, minimum: 1 }
+
+  /api/v1/admin/taxonomies/{kind}/{id}/usage:
+    parameters:
+      - in: path
+        name: kind
+        required: true
+        schema: { type: string, enum: [seasons, masses, special_events] }
+      - in: path
+        name: id
+        required: true
+        schema: { $ref: "#/components/schemas/UUID" }
+    get:
+      tags: [Taxonomies (admin)]
+      summary: Get usage count (drives confirm dialog, FR-019)
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [usage_count]
+                properties:
+                  usage_count: { type: integer, minimum: 0 }
+
+  # ── Admin: optional field definitions ──────────────────────────────
+  /api/v1/admin/optional-fields:
+    get:
+      tags: [Optional fields (admin)]
+      summary: List optional field definitions
+      description: Public read allowed (drives song-detail rendering).
+      responses:
+        "200":
+          description: List
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OptionalFieldDefinition" }
+    post:
+      tags: [Optional fields (admin)]
+      summary: Create optional field definition (FR-018)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OptionalFieldDefinitionWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OptionalFieldDefinition" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Duplicate label
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/admin/optional-fields/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { $ref: "#/components/schemas/UUID" } }
+    put:
+      tags: [Optional fields (admin)]
+      summary: Rename optional field definition (FR-018, edge case: rename preserves values)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OptionalFieldDefinitionWrite" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OptionalFieldDefinition" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [Optional fields (admin)]
+      summary: Delete (with detach) an optional field definition (FR-019)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+        - { in: query,  name: detach,   schema: { type: boolean, default: false } }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: In use, and `detach=false`
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      usage_count: { type: integer, minimum: 1 }
+
+  /api/v1/admin/optional-fields/{id}/usage:
+    parameters:
+      - { in: path, name: id, required: true, schema: { $ref: "#/components/schemas/UUID" } }
+    get:
+      tags: [Optional fields (admin)]
+      summary: Get usage count
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [usage_count]
+                properties:
+                  usage_count: { type: integer, minimum: 0 }
+
+  # ── Super Admin: user role management ──────────────────────────────
+  /api/v1/super-admin/users:
+    get:
+      tags: [Users & roles (super admin)]
+      summary: List user accounts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: q,         schema: { type: string, maxLength: 100 }, description: "Match on email / display name" }
+        - { in: query, name: page,      schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: page_size, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        "200":
+          description: Page of users
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAccountPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/super-admin/users/{id}/role:
+    parameters:
+      - { in: path, name: id, required: true, schema: { $ref: "#/components/schemas/UUID" } }
+    put:
+      tags: [Users & roles (super admin)]
+      summary: Promote / demote user (FR-005, FR-006)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: header, name: If-Match, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [USER, ADMIN] }
+              description: |
+                Promotes USER ↔ ADMIN only. Promoting to / demoting from SUPER_ADMIN
+                is not permitted via the API in v1 (FR-006 / spec assumption: Super
+                Admins seeded via env allowlist on first sign-in).
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAccount" }
+        "400":
+          description: Invalid role transition (e.g., would leave zero Super Admins, FR-006)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ── Auth introspection ─────────────────────────────────────────────
+  /api/v1/auth/me:
+    get:
+      tags: [Users & roles (super admin)]
+      summary: Get the authenticated user's account (any role)
+      description: |
+        On first call for a Clerk user, the system MAY auto-provision the row
+        (FR-007 seed-on-first-login). Returns the local `UserAccount`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAccount" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── Health ────────────────────────────────────────────────────────
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+
+# ─────────────────────────────────────────────────────────────────────
+# Components
+# ─────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Clerk-issued JWT.
+
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid bearer token (FR-001)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not authorised for this action (FR-004)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Optimistic lock violation (FR-030) or unique constraint violation (FR-009)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Stable machine-readable code, e.g.
+                `validation_error`, `unauthorized`, `forbidden`, `not_found`,
+                `conflict_version`, `conflict_duplicate_song`,
+                `conflict_taxonomy_in_use`, `last_super_admin`.
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+
+    Role:
+      type: string
+      enum: [SUPER_ADMIN, ADMIN, USER]
+
+    UserAccount:
+      type: object
+      required: [id, email, role, created_at, updated_at, version]
+      properties:
+        id:           { $ref: "#/components/schemas/UUID" }
+        email:        { type: string, format: email }
+        display_name: { type: string, nullable: true }
+        role:         { $ref: "#/components/schemas/Role" }
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+        version:      { type: integer, minimum: 1 }
+
+    UserAccountPage:
+      type: object
+      required: [items, page, page_size, total]
+      properties:
+        items:     { type: array, items: { $ref: "#/components/schemas/UserAccount" } }
+        page:      { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1 }
+        total:     { type: integer, minimum: 0 }
+
+    Composer:
+      type: object
+      required: [id, name]
+      properties:
+        id:   { $ref: "#/components/schemas/UUID" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+
+    TaxonomyKind:
+      type: string
+      enum: [SEASON, MASS, SPECIAL_EVENT]
+
+    TaxonomyValue:
+      type: object
+      required: [id, kind, name, version, created_at, updated_at]
+      properties:
+        id:         { $ref: "#/components/schemas/UUID" }
+        kind:       { $ref: "#/components/schemas/TaxonomyKind" }
+        name:       { type: string, minLength: 1, maxLength: 80 }
+        version:    { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TaxonomyValueWrite:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+
+    OptionalFieldDefinition:
+      type: object
+      required: [id, label, kind, version, created_at, updated_at]
+      properties:
+        id:         { $ref: "#/components/schemas/UUID" }
+        label:      { type: string, minLength: 1, maxLength: 60 }
+        kind:       { type: string, enum: [LINK] }
+        version:    { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    OptionalFieldDefinitionWrite:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 60 }
+        kind:  { type: string, enum: [LINK], default: LINK }
+
+    OptionalFieldValue:
+      type: object
+      required: [definition_id, label, value_url]
+      properties:
+        definition_id: { $ref: "#/components/schemas/UUID" }
+        label:         { type: string, description: "Mirrors the definition's current label (FR-018 rename preserves value)" }
+        value_url:     { type: string, format: uri }
+
+    SongSummary:
+      type: object
+      required: [id, title, composers, version]
+      properties:
+        id:        { $ref: "#/components/schemas/UUID" }
+        title:     { type: string, minLength: 1, maxLength: 200 }
+        composers: { type: array, items: { $ref: "#/components/schemas/Composer" }, minItems: 1 }
+        seasons:        { type: array, items: { $ref: "#/components/schemas/TaxonomyValue" } }
+        masses:         { type: array, items: { $ref: "#/components/schemas/TaxonomyValue" } }
+        special_events: { type: array, items: { $ref: "#/components/schemas/TaxonomyValue" } }
+        version:   { type: integer, minimum: 1 }
+
+    SongDetail:
+      allOf:
+        - $ref: "#/components/schemas/SongSummary"
+        - type: object
+          required: [optional_fields, created_at, updated_at]
+          properties:
+            optional_fields:
+              type: array
+              items: { $ref: "#/components/schemas/OptionalFieldValue" }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    SongPage:
+      type: object
+      required: [items, page, page_size, total]
+      properties:
+        items:     { type: array, items: { $ref: "#/components/schemas/SongSummary" } }
+        page:      { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1 }
+        total:     { type: integer, minimum: 0 }
+
+    SongWriteRequest:
+      type: object
+      required: [title, composers]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        composers:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string, minLength: 1, maxLength: 120 }
+          description: "Find-or-create by case-insensitive normalised name."
+        season_ids:        { type: array, items: { $ref: "#/components/schemas/UUID" } }
+        mass_ids:          { type: array, items: { $ref: "#/components/schemas/UUID" } }
+        special_event_ids: { type: array, items: { $ref: "#/components/schemas/UUID" } }
+        optional_fields:
+          type: array
+          items:
+            type: object
+            required: [definition_id, value_url]
+            properties:
+              definition_id: { $ref: "#/components/schemas/UUID" }
+              value_url:     { type: string, format: uri, description: "MUST be absolute http(s) URL (FR-016)" }

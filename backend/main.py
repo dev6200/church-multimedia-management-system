@@ -1,14 +1,9 @@
-from fastapi import FastAPI
+"""Container entrypoint — re-exports the FastAPI app for ``uvicorn main:app``.
 
-app = FastAPI()
+The actual application factory lives at ``src.interfaces.api.main:create_app``
+per the layered architecture in ``research.md`` §2.
+"""
 
+from src.interfaces.api.main import app
 
-@app.get("/")
-def read_root():
-    return {"Hello": "Worlds"}
-
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str | None = None):
-    return {"item_id": item_id, "q": q}
-
+__all__ = ["app"]

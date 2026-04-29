@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyright/
 .python-version
 
 # Virtual environments
@@ -12,9 +13,34 @@ venv/
 .venv/
 backend/venv/
 
+# Node / Next.js
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+.playwright-mcp/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
 # IDE / OS
 .vscode/
 .idea/
+.DS_Store
 Thumbs.db
 Desktop.ini
 
